@@ -1,0 +1,50 @@
+{
+  "name": "Telegram Multi Account Bot",
+  "description": "Telegram Bot with Session Management and Admin Panel",
+  "logo": "https://files.catbox.moe/b7qhd8.jpg",
+  "keywords": [
+    "python3",
+    "telegram",
+    "bot",
+    "pyrogram"
+  ],
+  "env": {
+    "API_ID": {
+      "description": "API_ID from my.telegram.org",
+      "value": "31551910",
+      "required": true
+    },
+    "API_HASH": {
+      "description": "API_HASH from my.telegram.org",
+      "value": "c2e8e7946d5e4ea947d44b674008f33e",
+      "required": true
+    },
+    "BOT_TOKEN": {
+      "description": "Bot Token from @BotFather",
+      "value": "",
+      "required": true
+    },
+    "MONGO_URL": {
+      "description": "MongoDB URI Connection String",
+      "value": "",
+      "required": true
+    },
+    "OWNER_ID": {
+      "description": "Your Numeric Telegram User ID",
+      "value": "8633462777",
+      "required": true
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "eco"
+    }
+  }
+}
+
