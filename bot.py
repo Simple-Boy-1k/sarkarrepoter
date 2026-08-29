@@ -21,10 +21,11 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", "123456789"))
 MONGO_URL = os.environ.get("MONGO_URL", "YOUR_MONGO_URL")
 
-# Database Connection with Timeout
+# Mongo Client with strict 5-second timeout to prevent freezing
 mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
     MONGO_URL,
-    serverSelectionTimeoutMS=5000
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=5000
 )
 db = mongo_client["multi_account_bot_db"]
 accounts_col = db["user_accounts"]
@@ -106,12 +107,15 @@ async def start_handler(client: Client, message: Message):
     user_id = message.from_user.id
     USER_STATES.pop(user_id, None)
 
-    # Safe DB User Insert
+    # Non-blocking Mongo DB save with 3-second timeout
     try:
-        await users_col.update_one(
-            {"user_id": user_id},
-            {"$set": {"user_id": user_id, "first_name": message.from_user.first_name}},
-            upsert=True
+        await asyncio.wait_for(
+            users_col.update_one(
+                {"user_id": user_id},
+                {"$set": {"user_id": user_id, "first_name": message.from_user.first_name}},
+                upsert=True
+            ),
+            timeout=3.0
         )
     except Exception as e:
         logging.error(f"Database Connection Error: {e}")
@@ -136,7 +140,6 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     data = callback_query.data
 
-    # User Actions
     if data == "btn_add_account":
         USER_STATES[user_id] = {"step": "WAITING_FOR_SESSION"}
         await callback_query.answer()
@@ -148,7 +151,10 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
     elif data == "btn_my_accounts":
         await callback_query.answer()
         try:
-            user_accs = await accounts_col.find({"added_by": user_id}).to_list(length=100)
+            user_accs = await asyncio.wait_for(
+                accounts_col.find({"added_by": user_id}).to_list(length=100),
+                timeout=3.0
+            )
         except Exception as e:
             logging.error(f"DB Error: {e}")
             user_accs = []
@@ -172,7 +178,7 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
         acc_doc_id = data.replace("del_acc_", "")
         query = {"_id": ObjectId(acc_doc_id)} if user_id == OWNER_ID else {"_id": ObjectId(acc_doc_id), "added_by": user_id}
         try:
-            await accounts_col.delete_one(query)
+            await asyncio.wait_for(accounts_col.delete_one(query), timeout=3.0)
         except Exception as e:
             logging.error(f"DB Delete Error: {e}")
         await callback_query.answer("✅ Account Removed!", show_alert=True)
@@ -190,7 +196,6 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="btn_back_main")]])
         )
 
-    # Owner / Admin Actions
     elif data == "btn_admin_panel":
         if user_id != OWNER_ID:
             await callback_query.answer("⛔ Access Denied!", show_alert=True)
@@ -202,9 +207,9 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
         if user_id != OWNER_ID: return
         await callback_query.answer()
         try:
-            tot_users = await users_col.count_documents({})
-            tot_accs = await accounts_col.count_documents({})
-            tot_reports = await reports_col.count_documents({})
+            tot_users = await asyncio.wait_for(users_col.count_documents({}), timeout=3.0)
+            tot_accs = await asyncio.wait_for(accounts_col.count_documents({}), timeout=3.0)
+            tot_reports = await asyncio.wait_for(reports_col.count_documents({}), timeout=3.0)
         except Exception:
             tot_users = tot_accs = tot_reports = 0
 
@@ -220,7 +225,7 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
         if user_id != OWNER_ID: return
         await callback_query.answer()
         try:
-            all_accs = await accounts_col.find().to_list(length=100)
+            all_accs = await asyncio.wait_for(accounts_col.find().to_list(length=100), timeout=3.0)
         except Exception:
             all_accs = []
 
@@ -259,7 +264,6 @@ async def message_input_handler(client: Client, message: Message):
 
     step = state.get("step")
 
-    # Account Add System
     if step == "WAITING_FOR_SESSION":
         session_str = message.text.strip()
         status_msg = await message.reply_text("⏳ **Session testing...**")
@@ -270,26 +274,25 @@ async def message_input_handler(client: Client, message: Message):
             return
 
         try:
-            existing = await accounts_col.find_one({"account_id": acc_me.id})
+            existing = await asyncio.wait_for(accounts_col.find_one({"account_id": acc_me.id}), timeout=3.0)
             if existing:
                 await status_msg.edit_text("⚠️ **Yeh account pehle se DB me hai!**", reply_markup=get_main_keyboard(user_id))
                 USER_STATES.pop(user_id, None)
                 return
 
-            await accounts_col.insert_one({
+            await asyncio.wait_for(accounts_col.insert_one({
                 "added_by": user_id,
                 "account_id": acc_me.id,
                 "first_name": acc_me.first_name,
                 "username": acc_me.username or "",
                 "session_string": session_str
-            })
+            }), timeout=3.0)
         except Exception as e:
             logging.error(f"DB Error: {e}")
 
         USER_STATES.pop(user_id, None)
         await status_msg.edit_text(f"✅ **Account Added!** Name: {acc_me.first_name}", reply_markup=get_main_keyboard(user_id))
 
-    # Report System
     elif step == "WAITING_FOR_LINK":
         link = message.text.strip()
         USER_STATES[user_id] = {"step": "WAITING_FOR_REASON", "link": link}
@@ -301,7 +304,7 @@ async def message_input_handler(client: Client, message: Message):
         USER_STATES.pop(user_id, None)
 
         try:
-            await reports_col.insert_one({"user_id": user_id, "target": link, "reason": reason})
+            await asyncio.wait_for(reports_col.insert_one({"user_id": user_id, "target": link, "reason": reason}), timeout=3.0)
         except Exception as e:
             logging.error(f"DB Error: {e}")
 
@@ -315,11 +318,10 @@ async def message_input_handler(client: Client, message: Message):
 
         await message.reply_text("✅ **Report Submitted!**", reply_markup=get_main_keyboard(user_id))
 
-    # Owner Broadcast System
     elif step == "WAITING_FOR_BROADCAST" and user_id == OWNER_ID:
         USER_STATES.pop(user_id, None)
         try:
-            users = await users_col.find().to_list(length=5000)
+            users = await asyncio.wait_for(users_col.find().to_list(length=5000), timeout=3.0)
         except Exception:
             users = []
         success = 0
@@ -337,11 +339,8 @@ async def message_input_handler(client: Client, message: Message):
 
 # ==================== BOT RUNNER ====================
 
-async def main():
-    await app.start()
-    logging.info("Bot Started Successfully!")
-    await idle()
-    await app.stop()
+def main():
+    app.run()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
