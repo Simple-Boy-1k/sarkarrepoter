@@ -21,8 +21,11 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", "123456789"))
 MONGO_URL = os.environ.get("MONGO_URL", "YOUR_MONGO_URL")
 
-# Database Connection
-mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
+# Database Connection with Timeout
+mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
+    MONGO_URL,
+    serverSelectionTimeoutMS=5000
+)
 db = mongo_client["multi_account_bot_db"]
 accounts_col = db["user_accounts"]
 reports_col = db["submitted_reports"]
@@ -103,11 +106,15 @@ async def start_handler(client: Client, message: Message):
     user_id = message.from_user.id
     USER_STATES.pop(user_id, None)
 
-    await users_col.update_one(
-        {"user_id": user_id},
-        {"$set": {"user_id": user_id, "first_name": message.from_user.first_name}},
-        upsert=True
-    )
+    # Safe DB User Insert
+    try:
+        await users_col.update_one(
+            {"user_id": user_id},
+            {"$set": {"user_id": user_id, "first_name": message.from_user.first_name}},
+            upsert=True
+        )
+    except Exception as e:
+        logging.error(f"Database Connection Error: {e}")
 
     start_text = (
         f"👋 **Welcome, {message.from_user.first_name}!**\n\n"
@@ -140,7 +147,12 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
 
     elif data == "btn_my_accounts":
         await callback_query.answer()
-        user_accs = await accounts_col.find({"added_by": user_id}).to_list(length=100)
+        try:
+            user_accs = await accounts_col.find({"added_by": user_id}).to_list(length=100)
+        except Exception as e:
+            logging.error(f"DB Error: {e}")
+            user_accs = []
+
         if not user_accs:
             await callback_query.edit_message_text(
                 "❌ Aapka koi account added nahi hai.",
@@ -159,7 +171,10 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
     elif data.startswith("del_acc_"):
         acc_doc_id = data.replace("del_acc_", "")
         query = {"_id": ObjectId(acc_doc_id)} if user_id == OWNER_ID else {"_id": ObjectId(acc_doc_id), "added_by": user_id}
-        await accounts_col.delete_one(query)
+        try:
+            await accounts_col.delete_one(query)
+        except Exception as e:
+            logging.error(f"DB Delete Error: {e}")
         await callback_query.answer("✅ Account Removed!", show_alert=True)
         await callback_query.edit_message_text("🗑 **Account Database se remove ho gaya.**", reply_markup=get_main_keyboard(user_id))
 
@@ -186,9 +201,13 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
     elif data == "adm_stats":
         if user_id != OWNER_ID: return
         await callback_query.answer()
-        tot_users = await users_col.count_documents({})
-        tot_accs = await accounts_col.count_documents({})
-        tot_reports = await reports_col.count_documents({})
+        try:
+            tot_users = await users_col.count_documents({})
+            tot_accs = await accounts_col.count_documents({})
+            tot_reports = await reports_col.count_documents({})
+        except Exception:
+            tot_users = tot_accs = tot_reports = 0
+
         stats_text = (
             "📊 **SYSTEM STATS (OWNER PANEL)**\n\n"
             f"👤 **Total Bot Users:** `{tot_users}`\n"
@@ -200,7 +219,11 @@ async def callback_handler(client: Client, callback_query: CallbackQuery):
     elif data == "adm_all_accs":
         if user_id != OWNER_ID: return
         await callback_query.answer()
-        all_accs = await accounts_col.find().to_list(length=100)
+        try:
+            all_accs = await accounts_col.find().to_list(length=100)
+        except Exception:
+            all_accs = []
+
         if not all_accs:
             await callback_query.edit_message_text("❌ Database me koi account nahi hai.", reply_markup=get_admin_keyboard())
             return
@@ -246,19 +269,23 @@ async def message_input_handler(client: Client, message: Message):
             await status_msg.edit_text("❌ **Invalid Session String!**", reply_markup=get_cancel_keyboard())
             return
 
-        existing = await accounts_col.find_one({"account_id": acc_me.id})
-        if existing:
-            await status_msg.edit_text("⚠️ **Yeh account pehle se DB me hai!**", reply_markup=get_main_keyboard(user_id))
-            USER_STATES.pop(user_id, None)
-            return
+        try:
+            existing = await accounts_col.find_one({"account_id": acc_me.id})
+            if existing:
+                await status_msg.edit_text("⚠️ **Yeh account pehle se DB me hai!**", reply_markup=get_main_keyboard(user_id))
+                USER_STATES.pop(user_id, None)
+                return
 
-        await accounts_col.insert_one({
-            "added_by": user_id,
-            "account_id": acc_me.id,
-            "first_name": acc_me.first_name,
-            "username": acc_me.username or "",
-            "session_string": session_str
-        })
+            await accounts_col.insert_one({
+                "added_by": user_id,
+                "account_id": acc_me.id,
+                "first_name": acc_me.first_name,
+                "username": acc_me.username or "",
+                "session_string": session_str
+            })
+        except Exception as e:
+            logging.error(f"DB Error: {e}")
+
         USER_STATES.pop(user_id, None)
         await status_msg.edit_text(f"✅ **Account Added!** Name: {acc_me.first_name}", reply_markup=get_main_keyboard(user_id))
 
@@ -273,7 +300,10 @@ async def message_input_handler(client: Client, message: Message):
         link = state.get("link")
         USER_STATES.pop(user_id, None)
 
-        await reports_col.insert_one({"user_id": user_id, "target": link, "reason": reason})
+        try:
+            await reports_col.insert_one({"user_id": user_id, "target": link, "reason": reason})
+        except Exception as e:
+            logging.error(f"DB Error: {e}")
 
         try:
             await client.send_message(
@@ -288,7 +318,10 @@ async def message_input_handler(client: Client, message: Message):
     # Owner Broadcast System
     elif step == "WAITING_FOR_BROADCAST" and user_id == OWNER_ID:
         USER_STATES.pop(user_id, None)
-        users = await users_col.find().to_list(length=5000)
+        try:
+            users = await users_col.find().to_list(length=5000)
+        except Exception:
+            users = []
         success = 0
         status_msg = await message.reply_text("⏳ **Broadcast bhej raha hu...**")
 
@@ -312,4 +345,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
